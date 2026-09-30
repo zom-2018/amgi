@@ -79,7 +79,7 @@ public struct FutureDueChart: View {
                     .chartXAxis {
                         AxisMarks(values: .automatic(desiredCount: 5)) { _ in
                             AxisGridLine()
-                            AxisValueLabel()
+                            AxisValueLabel(collisionResolution: .greedy)
                         }
                     }
                     .frame(height: 180)

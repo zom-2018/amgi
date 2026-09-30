@@ -73,7 +73,7 @@ public struct HourlyChart: View {
                         AxisMarks(values: [0, 4, 8, 12, 16, 20]) { value in
                             AxisGridLine()
                             if let h = value.as(Int.self) {
-                                AxisValueLabel(formatHour(h))
+                                AxisValueLabel(formatHour(h), collisionResolution: .greedy)
                             }
                         }
                     }
@@ -101,7 +101,7 @@ public struct HourlyChart: View {
                         AxisMarks(values: [0, 4, 8, 12, 16, 20]) { value in
                             AxisGridLine()
                             if let h = value.as(Int.self) {
-                                AxisValueLabel(formatHour(h))
+                                AxisValueLabel(formatHour(h), collisionResolution: .greedy)
                             }
                         }
                     }
