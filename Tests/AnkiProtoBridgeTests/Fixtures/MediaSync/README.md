@@ -22,3 +22,16 @@ Upload's response is literal `OK` (no newline):
 `jq -rj '.upload' protocol.json | zstd -o upload.json.zst`.
 The server requires collection → begin → changes → ZIP → empty changes →
 sanity in that order. Unknown requests fail the test; no status is mocked.
+
+`collection.anki2` is the byte-identical decompressed copy of the compressed
+fixture above. The incremental tests serve current-time collection metadata
+with its `mod` / `scm` / `usn` values, so collection sync has no changes while
+media version 1 still needs fetching. Native incremental media skips `begin`
+because collection metadata already supplies the media USN.
+
+The interruption case sends half the real compressed media ZIP, declares the
+full Content-Length, then closes the connection. It requires a native sync
+error, no partially installed PNG, a successful retry with byte-identical media,
+an idempotent subsequent sync with no download, and clean Check Media / Check
+Database. Metadata is wrapped in one bounded raw-block zstd frame (under 256
+bytes); the media/collection payloads still use the original compressed fixtures.
