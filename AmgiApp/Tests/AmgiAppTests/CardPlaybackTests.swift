@@ -163,3 +163,105 @@ struct CardPlaybackTests {
         return false
     }
 }
+
+extension CardPlaybackTests {
+    @Test(arguments: [false, true])
+    func kaishiMP3StopsOnFlipNextStopAndUnmount(autoplay: Bool) async throws {
+        let directory = try mediaDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try #require(Bundle(for: MP3Fixture.self).url(forResource: "kaishi-probe", withExtension: "mp3"))
+        for name in ["先生 space.mp3", "sentence.mp3"] {
+            try FileManager.default.copyItem(at: fixture, to: directory.appendingPathComponent(name))
+        }
+        let backend = try AnkiBackend()
+        try backend.openCollection(collectionPath: directory.appendingPathComponent("collection.anki2").path,
+                                   mediaFolderPath: directory.appendingPathComponent("media").path,
+                                   mediaDbPath: directory.appendingPathComponent("media.db").path)
+        defer { try? backend.closeCollection() }
+        try await withDependencies {
+            $0.ankiBackend = backend
+            $0.mediaClient.folderURL = { directory }
+        } operation: {
+            let client = NotetypesClient.liveValue
+            let basic = try #require(try await client.listAll().first { $0.name == "Basic" })
+            var notetype = try await client.get(basic.id)
+            notetype.fields[0].name = "Word"
+            notetype.fields[1].name = "Sentence"
+            notetype.fields += [Notetype.Field(name: "Word Audio"), Notetype.Field(name: "Sentence Audio")]
+            // Minimal Word/Sentence/audio layout from donkuri/Kaishi's documented templates.
+            notetype.templates[0].config.qFormat = "<div lang=\"ja\">{{Word}}<div style='font-size:20px;'>{{Sentence}}</div></div>"
+            notetype.templates[0].config.aFormat = "<div lang=\"ja\">{{Word}}<div style='font-size:25px;'>{{Sentence}}</div>{{Word Audio}}{{Sentence Audio}}</div>"
+            try await client.update(notetype)
+            notetype = try await client.get(basic.id)
+            let rendered = try CardRenderingService.liveValue.renderUncommittedCard(
+                notetype, 0, ["先生", "<b>先生</b>は来た。", "[sound:先生 space.mp3]", "[sound:sentence.mp3]"]
+            )
+            var playing = false
+            let onState: (Bool) -> Void = { playing = $0 }
+            @MainActor func makeAnswerCard(stop: Int = 0, replay: Int = 0) -> CardWebView {
+                CardWebView(html: rendered.backHTML, autoplayEnabled: autoplay, isAnswerSide: true,
+                            replayRequestID: replay, stopAudioRequestID: stop, replayMode: .answerOnly,
+                            onAudioStateChange: onState)
+            }
+            let question = CardWebView(html: rendered.frontHTML, autoplayEnabled: false, onAudioStateChange: onState)
+            let coordinator = question.makeCoordinator()
+            let webView = question.makeWebView(coordinator: coordinator)
+            let window = try host(webView)
+            defer { window.isHidden = true; CardWebView.dismantleWebView(webView, coordinator: coordinator) }
+            ReviewAudioSession.apply(playInSilent: true)
+            defer { ReviewAudioSession.release() }
+            question.updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelector('#qa')?.textContent.includes('先生')") as? Bool == true
+            })
+            #expect(try await webView.evaluateJavaScript("document.querySelectorAll('.anki-sound-audio').length") as? Int == 0)
+            makeAnswerCard().updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelectorAll('.anki-sound-audio').length === 2") as? Bool == true
+            })
+            if !autoplay {
+                _ = try await webView.evaluateJavaScript("document.querySelector('.sound-btn .replay-button').click()")
+            }
+            try #require(try await wait { playing })
+            let selector = autoplay ? "#amgi-audio-queue-player" : ".anki-sound-audio"
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelector('\(selector)').duration >= 3.9 && document.querySelector('\(selector)').currentTime > 0") as? Bool == true
+            })
+            // Flip back while the previous audio element remains retained for the assertion.
+            _ = try await webView.evaluateJavaScript("void(window.retiredAudio = document.querySelector('\(selector)'))")
+            question.updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("window.retiredAudio.paused && !amgiCardState().isAnswerSide") as? Bool == true
+            })
+            makeAnswerCard().updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelectorAll('.anki-sound-audio').length === 2") as? Bool == true
+            })
+            _ = try await webView.evaluateJavaScript("document.querySelector('.sound-btn .replay-button').click()")
+            try #require(try await wait { playing })
+            makeAnswerCard(stop: 1).updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait { !playing })
+            #expect(try await webView.evaluateJavaScript("Array.from(document.querySelectorAll('audio')).every(a => a.paused)") as? Bool == true)
+            makeAnswerCard(stop: 1, replay: 1).updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait { playing })
+            CardWebView(html: "<p>Next card</p>", autoplayEnabled: false, cardOrdinal: 1,
+                        replayRequestID: 1, stopAudioRequestID: 1, onAudioStateChange: onState)
+                .updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait { !playing })
+            makeAnswerCard(stop: 1, replay: 1).updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelectorAll('.anki-sound-audio').length === 2") as? Bool == true
+            })
+            _ = try await webView.evaluateJavaScript("document.querySelector('.sound-btn .replay-button').click()")
+            try #require(try await wait { playing })
+            CardWebView.dismantleWebView(webView, coordinator: coordinator)
+            let stopped = try await wait {
+                try await webView.evaluateJavaScript("Array.from(document.querySelectorAll('audio')).every(a => a.paused && a.currentTime === 0)") as? Bool == true
+            }
+            #expect(stopped, "Unmount must stop the real MP3 even while WebKit is retained")
+            _ = try await webView.evaluateJavaScript("window.amgiStopAllAudio()")
+        }
+    }
+}
+
+private final class MP3Fixture: NSObject {}
