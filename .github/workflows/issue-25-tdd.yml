@@ -7,7 +7,7 @@ permissions:
   contents: read
 concurrency:
   group: issue-25-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   regression:
     if: github.repository == 'zom-2018/amgi'
@@ -73,6 +73,12 @@ jobs:
             fs.writeFileSync(`${process.env.RUNNER_TEMP}/evidence/${evidenceName}.json`,JSON.stringify(result,null,2));
             for (const content of result.content ?? []) if (content.type === 'text') console.log(content.text);
             if (result.isError || result.structuredContent?.didError) throw new Error(`${evidenceName} failed; see evidence`);
+            if (name === 'test_sim') {
+              const counts = result.structuredContent?.data?.summary?.counts;
+              if (!counts || counts.passed < (evidenceName === 'focused-tests' ? 4 : 1) || counts.failed !== 0) {
+                throw new Error(`${evidenceName}: missing, incomplete or failing executed-test counts`);
+              }
+            }
             return result;
           }
           try {
