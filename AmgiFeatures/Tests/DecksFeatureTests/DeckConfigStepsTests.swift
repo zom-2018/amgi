@@ -29,6 +29,7 @@ struct DeckConfigStepsTests {
         let model = model()
         let steps: [Float] = [1 / 60, 0.5, 1.5, 10]
         #expect(model.parseSteps(model.formatSteps(steps)) == steps)
+        #expect(model.formatSteps([1, 10]) == "1m 10m")
     }
 
     @Test func emptyStepsRemainEmpty() {
