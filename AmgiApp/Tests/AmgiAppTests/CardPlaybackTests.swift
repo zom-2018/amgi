@@ -14,8 +14,8 @@ import WebKit
 @MainActor
 @Suite(.serialized)
 struct CardPlaybackTests {
-    @Test(arguments: ["Hello & world!", "<b>Hello</b>&nbsp;&amp; <i>world</i>!"])
-    func nativeRenderedTTSUsesSpokenText(field: String) async throws {
+    @Test(arguments: ["Hello & world!", "<b>Hello</b>&nbsp;&amp; <i>world</i>!"], [false, true])
+    func nativeRenderedTTSUsesSpokenText(field: String, autoplay: Bool) async throws {
         let directory = try mediaDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let backend = try AnkiBackend()
@@ -40,7 +40,7 @@ struct CardPlaybackTests {
         #expect(html.contains("[anki:tts"))
 
         var started = false
-        let card = CardWebView(html: html, autoplayEnabled: false, onAudioStateChange: {
+        let card = CardWebView(html: html, autoplayEnabled: autoplay, onAudioStateChange: {
             if $0 { started = true }
         })
         let coordinator = card.makeCoordinator()
@@ -48,6 +48,8 @@ struct CardPlaybackTests {
         let window = try host(webView)
         defer { window.isHidden = true }
         defer { CardWebView.dismantleWebView(webView, coordinator: coordinator) }
+        ReviewAudioSession.apply(playInSilent: true)
+        defer { ReviewAudioSession.release() }
         card.updateWebView(webView, coordinator: coordinator)
         let loaded = try await wait {
             try await webView.evaluateJavaScript("!!document.querySelector('.tts-btn')") as? Bool == true
@@ -58,9 +60,9 @@ struct CardPlaybackTests {
         let language = try await webView.evaluateJavaScript("document.querySelector('.tts-btn').dataset.ttsLang") as? String
         #expect(language == "en_US")
 
-        ReviewAudioSession.apply(playInSilent: true)
-        defer { ReviewAudioSession.release() }
-        _ = try await webView.evaluateJavaScript("document.querySelector('.tts-btn').click()")
+        if !autoplay {
+            _ = try await webView.evaluateJavaScript("document.querySelector('.tts-btn').click()")
+        }
         let spoke = try await wait { started }
         #expect(spoke, "The real WK message must start AVSpeechSynthesizer")
     }
@@ -125,6 +127,57 @@ struct CardPlaybackTests {
         #expect(player.isPlaying)
         let ended = try await wait { !player.isPlaying }
         #expect(ended)
+    }
+
+    @Test func mixedSpeechAndSoundQueueFinishesInOrderAndStopsWithoutAdvancing() async throws {
+        let directory = try mediaDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await withDependencies {
+            $0.mediaClient.folderURL = { directory }
+        } operation: {
+            var playing = false
+            let card = CardWebView(
+                html: "[anki:tts lang=en_US]Hello[/anki:tts][sound:先生 space.wav][anki:tts lang=en_US]Goodbye[/anki:tts]",
+                autoplayEnabled: false, onAudioStateChange: { playing = $0 }
+            )
+            let coordinator = card.makeCoordinator()
+            let webView = card.makeWebView(coordinator: coordinator)
+            let window = try host(webView)
+            defer { window.isHidden = true; CardWebView.dismantleWebView(webView, coordinator: coordinator) }
+            ReviewAudioSession.apply(playInSilent: true)
+            defer { ReviewAudioSession.release() }
+            card.updateWebView(webView, coordinator: coordinator)
+            try #require(try await wait {
+                try await webView.evaluateJavaScript("document.querySelectorAll('.tts-btn').length === 2") as? Bool == true
+            })
+            _ = try await webView.evaluateJavaScript("amgiReplayAll('question')")
+            try #require(try await wait { playing })
+            let oldID = try #require(try await webView.evaluateJavaScript("amgiPendingTts?.requestID") as? String)
+            _ = try await webView.evaluateJavaScript("amgiStopAllAudio(); amgiTtsFinished('\(oldID)')")
+            try #require(try await wait { !playing })
+            #expect(try await webView.evaluateJavaScript("!document.querySelector('#amgi-audio-queue-player').hasAttribute('src')") as? Bool == true)
+            _ = try await webView.evaluateJavaScript("""
+                window.completedPlayback = [];
+                const finish = window.amgiTtsFinished;
+                window.amgiTtsFinished = function(id) {
+                    window.completedPlayback.push('tts');
+                    finish(id);
+                };
+                document.querySelector('#amgi-audio-queue-player').addEventListener('ended', () => window.completedPlayback.push('sound'));
+                amgiReplayAll('question');
+                """)
+            let finished = try await wait {
+                try await webView.evaluateJavaScript("window.completedPlayback.length === 3 && !window.__amgiAudioPlaying") as? Bool == true
+            }
+            #expect(finished)
+            #expect(try await webView.evaluateJavaScript("window.completedPlayback") as? [String] == ["tts", "sound", "tts"])
+            #expect(!playing)
+            let answerItems = try await webView.evaluateJavaScript("""
+                window.__amgiQuestionAudioSrcs = new Set([amgiReplayKey(document.querySelector('.tts-btn'))]);
+                collectAudioQueue('answerOnly').map(item => item.matches('.tts-btn') ? item.dataset.ttsText : 'sound');
+                """) as? [String]
+            #expect(answerItems == ["sound", "Goodbye"])
+        }
     }
 
     private func mediaDirectory() throws -> URL {
