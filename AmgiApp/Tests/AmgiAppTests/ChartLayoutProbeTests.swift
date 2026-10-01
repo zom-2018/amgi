@@ -54,6 +54,15 @@ struct ChartLayoutProbeTests {
                 let visibleHours = lines.flatMap { $0.split(separator: " ").map(String.init) }
                     .filter { hourLabels.contains($0) }
                 #expect(visibleHours.count >= 4) // Do not pass by hiding all axis labels.
+                if size == .accessibility3 {
+                    let total = future.futureDue
+                        .filter { Int($0.key) < period.days }
+                        .values.reduce(0) { $0 + Int($1) }
+                    #expect(lines.contains(String(total)), "Footer numbers must not split into multiple lines")
+                    #expect(lines.contains("Tomorrow"))
+                    #expect(lines.joined(separator: " ").contains("Daily Load"))
+                    #expect(lines.contains("100"), "Accuracy Y-axis must retain a readable upper tick")
+                }
                 if width >= 320 && period == .all {
                     #expect(lines.contains("10,000"))
                 }
